@@ -28,6 +28,7 @@
 #include <glib/gstdio.h>
 #include <errno.h>
 
+#include <libavutil/frame.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/stereo3d.h>
 
@@ -633,6 +634,60 @@ stereo_gst_to_av (GstVideoMultiviewMode mview_mode)
   return AV_STEREO3D_2D;
 }
 
+static gboolean
+gst_ffmpegvidenc_handle_user_data (GstBuffer * inbuf, GstMeta ** meta,
+                                   gpointer object)
+{
+  GstFFMpegVidEnc     *ffmpegenc =  * (GstFFMpegVidEnc **) object;
+  const GstMetaInfo   *user_data_info = gst_mpeg_user_data_meta_get_info ();
+  GstMPEGUserDataMeta *umeta = (GstMPEGUserDataMeta *) * meta;
+
+  guint8  *data = NULL;
+  gsize    size = 0;
+
+  /*
+     Is Side Data available?
+   */
+  if ((*meta)->info->api != user_data_info->api) {
+    GST_DEBUG_OBJECT (ffmpegenc, "NOT User Data");
+    return TRUE;
+  }
+
+  data = (guint8*) g_bytes_get_data (umeta->data, &size);
+
+  if (data && size) {
+    enum AVFrameSideDataType type = 0;
+    AVFrameSideData *ff_side_data = 0;
+
+    if (umeta->user_data_identifier == GST_VIDEO_USER_DATA_IDENTIFIER_ATSC) {
+      if (umeta->user_data_type_code == GST_VIDEO_USER_DATA_TYPE_CC)
+        type = AV_FRAME_DATA_A53_CC;
+#if 0 // Not supported by FFmpeg, yet
+      else if (umeta->user_data_type_code == GST_VIDEO_USER_DATA_TYPE_BAR)
+        type = AV_FRAME_DATA_A53_BAR;
+#endif
+    }
+    else if (umeta->user_data_identifier == GST_VIDEO_USER_DATA_IDENTIFIER_AFD)
+      type = AV_FRAME_DATA_AFD;
+    else if (umeta->user_data_identifier == GST_VIDEO_USER_DATA_IDENTIFIER_DESCRIPTORS) {
+#if 0 // Not supported by FFmpeg, yet
+      if (ffmpegenc->context->descriptors_size != size) {
+        ffmpegenc->context->descriptors = realloc(ffmpegenc->context->descriptors, size);
+        ffmpegenc->context->descriptors_size = size;
+      }
+      memcpy(ffmpegenc->context->descriptors, data, size);
+#endif
+    }
+
+    if (type) {
+      ff_side_data = av_frame_new_side_data (ffmpegenc->picture, type, size);
+      memcpy (ff_side_data->data, data, size);
+    }
+  }
+
+  return TRUE;
+}
+
 static GstFlowReturn
 gst_ffmpegvidenc_handle_frame (GstVideoEncoder * encoder,
     GstVideoCodecFrame * frame)
@@ -702,6 +757,10 @@ gst_ffmpegvidenc_handle_frame (GstVideoEncoder * encoder,
 
   have_data = 0;
   pkt = g_slice_new0 (AVPacket);
+
+  gst_buffer_foreach_meta (buffer_info->buffer,
+                           gst_ffmpegvidenc_handle_user_data,
+                           &ffmpegenc);
 
   ret =
       avcodec_encode_video2 (ffmpegenc->context, pkt, ffmpegenc->picture,
